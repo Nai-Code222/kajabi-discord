@@ -45,6 +45,7 @@ app.get("/", async (req, res) => {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
     const discordId = userResp.data.id;
+    console.log("Discord User ID:", discordId);
 
     // 3️⃣ Add to guild
     await axios.put(
@@ -52,6 +53,7 @@ app.get("/", async (req, res) => {
       { access_token: accessToken },
       { headers: { Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}` } }
     );
+    console.log("Added to Discord guild");
 
     // 4️⃣ Update Kajabi
     await axios.post(
@@ -74,6 +76,7 @@ app.get("/", async (req, res) => {
         }
       }
     );
+    console.log("Updated Kajabi member with Discord ID");
 
     // 5️⃣ Redirect into your Discord invite
     res.redirect(process.env.DISCORD_INVITE_URL);
