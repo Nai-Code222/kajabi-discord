@@ -1,89 +1,62 @@
-require('dotenv').config();
-const express = require('express');
-const fetch = require('node-fetch');
-const qs = require('querystring');
-
-const {
-  DISCORD_CLIENT_ID,
-  DISCORD_CLIENT_SECRET,
-  DISCORD_BOT_TOKEN,
-  DISCORD_GUILD_ID,
-  KAJABI_API_KEY,
-  SITE_URL,
-  DISCORD_INVITE_URL,
-  PORT = 3000,
-} = process.env;
+require("dotenv").config();
+const express = require("express");
+const axios   = require("axios");
+const qs      = require("qs");
 
 const app = express();
+const port = process.env.PORT || 3000;
 
-// Step 1: Redirect Kajabi user to Discord OAuth2
-app.get('/discord/oauth2', (req, res) => {
-  const memberId = req.query.state;
-  if (!memberId) {
-    return res.status(400).send('Missing state (member ID)');
-  }
-  const redirectUri = encodeURIComponent(`http://localhost:3000/discord/callback`);
-  console.log(`Redirecting member ${memberId} to Discord OAuth2`);
-  console.log("Redirect URI:", redirectUri);
-  const url = `https://discord.com/api/oauth2/authorize?` +
-    `client_id=${DISCORD_CLIENT_ID}` +
-    `&redirect_uri=${redirectUri}` +
-    `&response_type=code` +
-    `&scope=identify%20guilds.join` +
-    `&state=${memberId}`;
-  res.redirect(url);
+// Step 1: Redirect users here to start OAuth
+app.get("/auth/discord", (req, res) => {
+  const params = new URLSearchParams({
+    client_id:     process.env.DISCORD_CLIENT_ID,
+    redirect_uri:  process.env.DISCORD_REDIRECT_URI,
+    response_type: "code",
+    scope:         "identify guilds.join",
+    state:         req.query.memberId  // you can pass memberId from Kajabi here
+  });
+  res.redirect(`https://discord.com/oauth2/authorize?${params.toString()}`);
 });
 
-// Step 2: Handle OAuth2 callback, join guild, update Kajabi, and redirect
-app.get('/discord/callback', async (req, res) => {
+// Step 2: Discord redirects back here with `?code=…&state=…`
+app.get("/", async (req, res) => {
+  const { code, state: memberId } = req.query;
+  if (!code || !memberId) {
+    return res.status(400).send("Missing code or state");
+  }
+
   try {
-    const { code, state: memberId } = req.query;
-    if (!code || !memberId) throw new Error('Missing code or state');
-
-    // Exchange code for access token
-    const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: qs.stringify({
-        client_id: DISCORD_CLIENT_ID,
-        client_secret: DISCORD_CLIENT_SECRET,
-        grant_type: 'authorization_code',
+    // 1️⃣ Exchange code for Access Token
+    const tokenResp = await axios.post(
+      "https://discord.com/api/oauth2/token",
+      qs.stringify({
+        client_id:     process.env.DISCORD_CLIENT_ID,
+        client_secret: process.env.DISCORD_CLIENT_SECRET,
+        grant_type:    "authorization_code",
         code,
-        redirect_uri: `${SITE_URL}/discord/callback`,
+        redirect_uri:  process.env.DISCORD_REDIRECT_URI
       }),
-    });
-    const tokenData = await tokenRes.json();
-    const accessToken = tokenData.access_token;
-    if (!accessToken) throw new Error('Invalid token response');
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+    const accessToken = tokenResp.data.access_token;
 
-    // Fetch Discord user
-    const userRes = await fetch('https://discord.com/api/users/@me', {
-      headers: { Authorization: `Bearer ${accessToken}` },
+    // 2️⃣ Fetch Discord user
+    const userResp = await axios.get("https://discord.com/api/users/@me", {
+      headers: { Authorization: `Bearer ${accessToken}` }
     });
-    const userData = await userRes.json();
-    const discordId = userData.id;
+    const discordId = userResp.data.id;
 
-    // Add user to guild
-    await fetch(
-      `https://discord.com/api/guilds/${DISCORD_GUILD_ID}/members/${discordId}`,
-      {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ access_token: accessToken }),
-      }
+    // 3️⃣ Add to guild
+    await axios.put(
+      `https://discord.com/api/guilds/${process.env.DISCORD_GUILD_ID}/members/${discordId}`,
+      { access_token: accessToken },
+      { headers: { Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}` } }
     );
 
-    // Update Kajabi member via GraphQL
-    await fetch('https://app.kajabi.com/api/v1/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${KAJABI_API_KEY}`,
-      },
-      body: JSON.stringify({
+    // 4️⃣ Update Kajabi
+    await axios.post(
+      process.env.KAJABI_GRAPHQL_URL,
+      {
         query: `
           mutation($id: ID!, $discordId: String!) {
             updateMember(input:{
@@ -92,17 +65,28 @@ app.get('/discord/callback', async (req, res) => {
             }) { member { id } }
           }
         `,
-        variables: { id: memberId, discordId },
-      }),
-    });
+        variables: { id: memberId, discordId }
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization:  `Bearer ${process.env.KAJABI_API_KEY}`
+        }
+      }
+    );
 
-    // Redirect to server invite
-    res.redirect(DISCORD_INVITE_URL);
-  } catch (err) {
-    console.error('OAuth flow error:', err);
-    res.status(500).send(`Error during OAuth flow: ${err.message}`);
+    // 5️⃣ Redirect into your Discord invite
+    res.redirect(process.env.DISCORD_INVITE_URL);
+  }
+  catch (err) {
+    console.error("OAuth flow error:", err.response?.data || err.message);
+    res.status(500).send("Internal error during OAuth flow");
   }
 });
 
-// Start server
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+// Health check
+app.get("/health", (req, res) => res.send("OK"));
+
+app.listen(port, () => {
+  console.log(`Listening on port ${port}`);
+});
